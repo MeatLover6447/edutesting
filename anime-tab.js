@@ -25,7 +25,7 @@
      CONSTANTS
      ========================================================================= */
   var ANILIST_API = 'https://graphql.anilist.co';
-  var SDK_URL = 'https://ani.pm/embed/sdk/v1.js';
+  var SDK_URL = 'https://ani-proxy.meatlover.workers.dev/?url=https://ani.pm/embed/sdk/v1.js';
   var RESULT_LIMIT = 24;
 
   var QUERY_SEARCH = [
@@ -487,7 +487,8 @@
       player = new window.AniPM.Player('#animePlayer', {
         anime: idStr,
         episode: ep,
-        lang: currentLang
+        lang: currentLang,
+        origin: 'https://ani-proxy.meatlover.workers.dev'
       });
       wirePlayerEvents(player);
     }).catch(function (err) {
