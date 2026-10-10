@@ -3,18 +3,18 @@
  * Adds an "Anime" tab (right after Guides) to the grades/attendance site,
  * powered by the ani.pm player SDK (https://ani.pm/developers).
  *
- * The tab includes a full AniList browse UI: search bar, trending grid,
- * cover-art cards, episode picker — click a cover and it plays.
- * No need to find IDs manually (though manual entry is still available).
+ * Features:
+ *   - AniList browse UI: search bar + trending grid + cover-art cards
+ *   - Click a cover → plays immediately
+ *   - Persistent SUB / DUB toggle above the player (always visible)
+ *   - Episode pills for one-tap episode switching
+ *   - Manual ID / URL entry as a fallback
+ *   - Live event log
  *
- * SETUP — one line, that's it:
- *   1. Put this file next to index.html
- *   2. Add this right before </body> in index.html:
+ * SETUP — one line:
+ *   Add this right before </body> in index.html:
  *
  *          <script src="anime-tab.js" defer></script>
- *
- * This script injects its own CSS, tab button, panel, and player logic.
- * Nothing else in your HTML changes.
  * ---------------------------------------------------------------------------
  */
 (function () {
@@ -60,7 +60,7 @@
   ].join('\n');
 
   /* =========================================================================
-     1. Styles (uses the site's existing CSS variables)
+     1. Styles
      ========================================================================= */
   var CSS = [
     /* --- tab shell --- */
@@ -100,8 +100,8 @@
     '.anime-manual[open] > summary::before { transform: rotate(90deg); }',
     '.anime-manual > summary:hover { color: var(--ink); }',
 
-    /* --- controls row --- */
-    '.anime-controls { display: grid; grid-template-columns: minmax(0, 1fr) 110px auto auto; gap: 12px; margin-bottom: 16px; align-items: end; }',
+    /* --- form controls --- */
+    '.anime-controls { display: grid; grid-template-columns: minmax(0, 1fr) 110px auto; gap: 12px; margin-bottom: 8px; align-items: end; }',
     '.anime-field { display: flex; flex-direction: column; gap: 7px; min-width: 0; }',
     '.anime-field label { font-size: 11.5px; color: var(--muted); letter-spacing: 0.05em; text-transform: uppercase; font-weight: 500; }',
     '.anime-input { background: var(--accent-soft); border: 1px solid var(--line); color: var(--ink); font-family: var(--sans); font-size: 15px; padding: 11px 14px; border-radius: 8px; outline: none; transition: border-color 0.15s ease, background 0.15s ease; -webkit-appearance: none; width: 100%; }',
@@ -109,17 +109,23 @@
     '.anime-input:focus { border-color: var(--accent); background: #2E3328; }',
     '.anime-input::-webkit-outer-spin-button, .anime-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }',
     '.anime-input[type="number"] { -moz-appearance: textfield; }',
-    '.anime-lang-toggle { display: flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; height: 44px; background: var(--accent-soft); }',
-    '.anime-lang-toggle button { background: transparent; border: none; color: var(--muted); font-family: var(--sans); font-size: 13.5px; font-weight: 600; letter-spacing: 0.06em; padding: 0 20px; cursor: pointer; transition: background 0.15s ease, color 0.15s ease; }',
-    '.anime-lang-toggle button:hover { color: var(--ink); }',
-    '.anime-lang-toggle button.active { background: var(--accent); color: var(--paper); }',
     '.anime-load-btn { background: var(--accent-soft); border: 1px solid var(--accent); color: var(--accent); font-family: var(--serif); font-size: 15px; font-weight: 500; padding: 0 26px; height: 44px; border-radius: 8px; cursor: pointer; transition: background 0.15s ease, color 0.15s ease; white-space: nowrap; }',
     '.anime-load-btn:hover, .anime-load-btn:focus-visible { background: var(--accent); color: var(--paper); outline: none; }',
     '.anime-load-btn:disabled { opacity: 0.5; cursor: progress; }',
 
-    /* --- picked title + episode pills --- */
-    '.anime-picked { font-size: 14px; color: var(--muted); margin: 0 0 12px; min-height: 21px; line-height: 1.5; }',
+    /* --- persistent SUB/DUB toggle --- */
+    '.anime-lang-toggle { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; height: 38px; background: var(--accent-soft); flex-shrink: 0; }',
+    '.anime-lang-toggle button { background: transparent; border: none; color: var(--muted); font-family: var(--sans); font-size: 12.5px; font-weight: 600; letter-spacing: 0.08em; padding: 0 18px; cursor: pointer; transition: background 0.15s ease, color 0.15s ease; }',
+    '.anime-lang-toggle button:hover { color: var(--ink); }',
+    '.anime-lang-toggle button.active { background: var(--accent); color: var(--paper); }',
+    '.anime-lang-toggle button:disabled { cursor: not-allowed; opacity: 0.55; }',
+
+    /* --- now playing bar (picked text + lang toggle side by side) --- */
+    '.anime-nowbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 0 0 12px; min-height: 38px; flex-wrap: wrap; }',
+    '.anime-picked { font-size: 14px; color: var(--muted); margin: 0; line-height: 1.5; flex: 1 1 auto; min-width: 0; }',
     '.anime-picked b { color: var(--accent); font-weight: 500; }',
+
+    /* --- episode pills --- */
     '.anime-episodes { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 20px; }',
     '.anime-episodes:empty { display: none; }',
     '.anime-ep-btn { background: var(--accent-soft); border: 1px solid var(--line); color: var(--muted); font-family: var(--sans); font-size: 12px; font-weight: 500; min-width: 36px; height: 30px; padding: 0 8px; border-radius: 6px; cursor: pointer; transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease; }',
@@ -144,9 +150,8 @@
     '  .anime-results { grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 12px 10px; }',
     '  .anime-controls { grid-template-columns: 1fr 1fr; }',
     '  .anime-field.anime-field-wide { grid-column: 1 / -1; }',
-    '  .anime-lang-toggle { width: 100%; }',
-    '  .anime-lang-toggle button { flex: 1; padding: 0; }',
     '  .anime-load-btn { grid-column: 1 / -1; }',
+    '  .anime-nowbar { align-items: flex-start; }',
     '}'
   ].join('\n');
 
@@ -155,7 +160,7 @@
   document.head.appendChild(styleEl);
 
   /* =========================================================================
-     2. Inject the tab button (after "Guides") + the tab panel
+     2. Inject the tab button + panel
      ========================================================================= */
   function injectTabs() {
     if (document.getElementById('tab-anime')) return true;
@@ -184,7 +189,7 @@
       '  <p class="anime-hint">',
       '    powered by <a href="https://ani.pm" target="_blank" rel="noopener noreferrer">ani.pm</a>',
       '    &middot; data from <a href="https://anilist.co" target="_blank" rel="noopener noreferrer">anilist</a>.',
-      '    search below and click a cover to play.',
+      '    search below and click a cover to play. switch sub / dub anytime with the toggle above the player.',
       '  </p>',
       '',
       '  <div class="anime-search-wrap">',
@@ -206,18 +211,18 @@
       '        <label for="animeEpInput">episode</label>',
       '        <input type="number" id="animeEpInput" class="anime-input" value="1" min="1" step="1" inputmode="numeric">',
       '      </div>',
-      '      <div class="anime-field">',
-      '        <label>language</label>',
-      '        <div class="anime-lang-toggle" role="group" aria-label="Language">',
-      '          <button type="button" data-lang="sub" class="active" aria-pressed="true">SUB</button>',
-      '          <button type="button" data-lang="dub" aria-pressed="false">DUB</button>',
-      '        </div>',
-      '      </div>',
       '      <button type="button" id="animeLoadBtn" class="anime-load-btn">Load</button>',
       '    </div>',
       '  </details>',
       '',
-      '  <p class="anime-picked" id="animePicked"></p>',
+      '  <div class="anime-nowbar">',
+      '    <p class="anime-picked" id="animePicked">nothing selected yet &mdash; pick a cover above or enter an id manually.</p>',
+      '    <div class="anime-lang-toggle" role="group" aria-label="Language">',
+      '      <button type="button" data-lang="sub" class="active" aria-pressed="true">SUB</button>',
+      '      <button type="button" data-lang="dub" aria-pressed="false">DUB</button>',
+      '    </div>',
+      '  </div>',
+      '',
       '  <div class="anime-episodes" id="animeEpisodes" role="group" aria-label="Episode"></div>',
       '',
       '  <div class="anime-player-shell"><div id="animePlayer"></div></div>',
@@ -248,7 +253,7 @@
   var player = null;
   var sdkPromise = null;
   var currentLang = 'sub';
-  var currentAnime = null;   // { id, title, episodes }
+  var currentAnime = null;   // { id, title, episodes, currentEpisode }
 
   function log(html) {
     var statusEl = document.getElementById('animeStatus');
@@ -267,7 +272,6 @@
     while (statusEl.children.length > 80) statusEl.removeChild(statusEl.firstChild);
   }
 
-  /* --- lazy sdk loader --- */
   function loadSDK() {
     if (sdkPromise) return sdkPromise;
     sdkPromise = new Promise(function (resolve, reject) {
@@ -286,7 +290,6 @@
     return sdkPromise;
   }
 
-  /* --- id parsing (manual input) --- */
   function parseAnimeId(raw) {
     var s = String(raw || '').trim();
     if (!s) return null;
@@ -338,6 +341,12 @@
   function displayTitle(m) {
     if (!m || !m.title) return 'untitled';
     return m.title.english || m.title.romaji || 'untitled';
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
   }
 
   function renderResults(list) {
@@ -429,15 +438,17 @@
     }
   }
 
-  function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, function (c) {
-      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  /* =========================================================================
+     6. Play + lang logic
+     ========================================================================= */
+  function syncLangButtons() {
+    document.querySelectorAll('.anime-lang-toggle button').forEach(function (b) {
+      var on = b.dataset.lang === currentLang;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
     });
   }
 
-  /* =========================================================================
-     6. Play logic
-     ========================================================================= */
   function play(animeId, episode) {
     var idStr = String(animeId);
     var ep = Number(episode) || 1;
@@ -448,7 +459,7 @@
     var loadBtn = document.getElementById('animeLoadBtn');
     if (loadBtn) loadBtn.disabled = true;
 
-    log('\u2026 loading player sdk');
+    log('\u2026 loading player sdk (' + currentLang + ')');
     loadSDK().then(function () {
       if (player) {
         log('\u21BB loading <b>' + escapeHtml(idStr) + '</b> ep ' + ep + ' (' + currentLang + ')');
@@ -483,7 +494,7 @@
   }
 
   /* =========================================================================
-     7. Init — wire everything up once, on first tab open
+     7. Init
      ========================================================================= */
   function initAnime() {
     if (initialized) return;
@@ -513,7 +524,7 @@
       var seq = ++searchSeq;
       setSearchStatus('searching\u2026');
       searchAnime(q).then(function (list) {
-        if (seq !== searchSeq) return; // stale
+        if (seq !== searchSeq) return;
         renderResults(list);
         setSearchStatus(list.length ? list.length + ' result' + (list.length === 1 ? '' : 's') : 'no results for "' + q + '"');
       }).catch(function (err) {
@@ -532,9 +543,7 @@
             trendingAnime().then(function (list) {
               renderResults(list);
               setSearchStatus('trending now');
-            }).catch(function () {
-              setSearchStatus('');
-            });
+            }).catch(function () { setSearchStatus(''); });
           }, 250);
           return;
         }
@@ -599,7 +608,6 @@
       currentAnime = { id: anime, title: anime, episodes: null, currentEpisode: episode };
       renderPicked();
       renderEpisodes();
-      // deselect any active card since we're not using the grid
       if (resultsGrid) {
         resultsGrid.querySelectorAll('.anime-card').forEach(function (c) { c.classList.remove('active'); });
       }
@@ -614,28 +622,34 @@
       });
     });
 
-    /* ---- language toggle ---- */
+    /* ---- SUB / DUB toggle (persistent, above player) ---- */
     langBtns.forEach(function (b) {
       b.addEventListener('click', function () {
         var newLang = b.dataset.lang;
         if (newLang === currentLang) return;
-        langBtns.forEach(function (x) {
-          var on = x === b;
-          x.classList.toggle('active', on);
-          x.setAttribute('aria-pressed', on ? 'true' : 'false');
-        });
         currentLang = newLang;
+        syncLangButtons();
+
         if (player) {
-          player.setLanguage(currentLang).then(function () {
-            log('\u21AA language \u2192 <b>' + currentLang + '</b>');
-          }).catch(function (err) {
-            log('\u26A0\uFE0F ' + escapeHtml(err && err.message ? err.message : 'could not change language'));
-          });
+          // Re-load the current title in the new language so audio/subs actually switch.
+          var id = currentAnime ? currentAnime.id : null;
+          var ep = currentAnime ? currentAnime.currentEpisode : 1;
+          if (id) {
+            log('\u21AA switching to <b>' + currentLang.toUpperCase() + '</b>\u2026');
+            player.loadTitle(String(id), ep, { lang: currentLang }).catch(function (err) {
+              log('\u26A0\uFE0F ' + escapeHtml(err && err.message ? err.message : 'could not switch language'));
+            });
+          } else {
+            // no title loaded yet; the next play() will pick up currentLang
+            log('\u21AA language set to <b>' + currentLang.toUpperCase() + '</b> (applies on next load)');
+          }
+        } else {
+          log('\u21AA language set to <b>' + currentLang.toUpperCase() + '</b> (applies on next load)');
         }
       });
     });
 
-    /* ---- initial picked text ---- */
+    syncLangButtons();
     renderPicked();
   }
 
