@@ -7,6 +7,7 @@
  *   - AniList browse UI: search bar + trending grid + cover-art cards
  *   - Click a cover → plays immediately
  *   - Persistent SUB / DUB toggle above the player (always visible)
+ *   - If a dub isn't available for a title, it automatically plays sub
  *   - Episode pills for one-tap episode switching
  *   - Manual ID / URL entry as a fallback
  *   - Live event log
@@ -114,16 +115,19 @@
     '.anime-load-btn:disabled { opacity: 0.5; cursor: progress; }',
 
     /* --- persistent SUB/DUB toggle --- */
+    '.anime-lang-block { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; flex-shrink: 0; }',
     '.anime-lang-toggle { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; height: 38px; background: var(--accent-soft); flex-shrink: 0; }',
     '.anime-lang-toggle button { background: transparent; border: none; color: var(--muted); font-family: var(--sans); font-size: 12.5px; font-weight: 600; letter-spacing: 0.08em; padding: 0 18px; cursor: pointer; transition: background 0.15s ease, color 0.15s ease; }',
     '.anime-lang-toggle button:hover { color: var(--ink); }',
     '.anime-lang-toggle button.active { background: var(--accent); color: var(--paper); }',
     '.anime-lang-toggle button:disabled { cursor: not-allowed; opacity: 0.55; }',
+    '.anime-lang-note { font-size: 11px; color: var(--muted); line-height: 1.4; text-align: right; max-width: 220px; }',
 
-    /* --- now playing bar (picked text + lang toggle side by side) --- */
-    '.anime-nowbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 0 0 12px; min-height: 38px; flex-wrap: wrap; }',
-    '.anime-picked { font-size: 14px; color: var(--muted); margin: 0; line-height: 1.5; flex: 1 1 auto; min-width: 0; }',
+    /* --- now playing bar --- */
+    '.anime-nowbar { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin: 0 0 12px; min-height: 38px; flex-wrap: wrap; }',
+    '.anime-picked { font-size: 14px; color: var(--muted); margin: 0; line-height: 1.5; flex: 1 1 auto; min-width: 0; padding-top: 8px; }',
     '.anime-picked b { color: var(--accent); font-weight: 500; }',
+    '.anime-picked .fallback-note { color: var(--accent); }',
 
     /* --- episode pills --- */
     '.anime-episodes { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 20px; }',
@@ -151,7 +155,9 @@
     '  .anime-controls { grid-template-columns: 1fr 1fr; }',
     '  .anime-field.anime-field-wide { grid-column: 1 / -1; }',
     '  .anime-load-btn { grid-column: 1 / -1; }',
-    '  .anime-nowbar { align-items: flex-start; }',
+    '  .anime-nowbar { align-items: stretch; }',
+    '  .anime-lang-block { align-items: stretch; }',
+    '  .anime-lang-note { text-align: left; max-width: none; }',
     '}'
   ].join('\n');
 
@@ -217,9 +223,12 @@
       '',
       '  <div class="anime-nowbar">',
       '    <p class="anime-picked" id="animePicked">nothing selected yet &mdash; pick a cover above or enter an id manually.</p>',
-      '    <div class="anime-lang-toggle" role="group" aria-label="Language">',
-      '      <button type="button" data-lang="sub" class="active" aria-pressed="true">SUB</button>',
-      '      <button type="button" data-lang="dub" aria-pressed="false">DUB</button>',
+      '    <div class="anime-lang-block">',
+      '      <div class="anime-lang-toggle" role="group" aria-label="Language">',
+      '        <button type="button" data-lang="sub" class="active" aria-pressed="true">SUB</button>',
+      '        <button type="button" data-lang="dub" aria-pressed="false">DUB</button>',
+      '      </div>',
+      '      <div class="anime-lang-note">if a dub isn&rsquo;t available, it plays sub automatically</div>',
       '    </div>',
       '  </div>',
       '',
@@ -254,6 +263,7 @@
   var sdkPromise = null;
   var currentLang = 'sub';
   var currentAnime = null;   // { id, title, episodes, currentEpisode }
+  var requestedLang = 'sub'; // what the user asked for (may differ from what's playing)
 
   function log(html) {
     var statusEl = document.getElementById('animeStatus');
@@ -406,8 +416,12 @@
       el.innerHTML = 'nothing selected yet &mdash; pick a cover above or enter an id manually.';
       return;
     }
-    el.innerHTML = 'now playing: <b>' + escapeHtml(currentAnime.title) + '</b> (anilist <b>' +
+    var html = 'now playing: <b>' + escapeHtml(currentAnime.title) + '</b> (anilist <b>' +
       escapeHtml(String(currentAnime.id)) + '</b>)';
+    if (currentAnime.fellBackToSub) {
+      html += ' <span class="fallback-note">&middot; no dub available, playing sub</span>';
+    }
+    el.innerHTML = html;
   }
 
   function renderEpisodes() {
@@ -453,8 +467,12 @@
     var idStr = String(animeId);
     var ep = Number(episode) || 1;
 
-    if (currentAnime) currentAnime.currentEpisode = ep;
+    if (currentAnime) {
+      currentAnime.currentEpisode = ep;
+      currentAnime.fellBackToSub = false;
+    }
     renderEpisodes();
+    renderPicked();
 
     var loadBtn = document.getElementById('animeLoadBtn');
     if (loadBtn) loadBtn.disabled = true;
@@ -489,7 +507,23 @@
       log('\u21AA episode \u2192 <b>' + (s && s.episode) + '</b>');
       if (currentAnime) { currentAnime.currentEpisode = Number(s && s.episode) || 1; renderEpisodes(); }
     });
-    p.on('languagechange', function (s) { log('\u21AA language \u2192 <b>' + (s && s.lang) + '</b>'); });
+    p.on('languagechange', function (s) {
+      var playingLang = s && s.lang ? String(s.lang).toLowerCase() : '';
+      log('\u21AA language \u2192 <b>' + escapeHtml(playingLang || 'unknown') + '</b>');
+
+      // If the viewer asked for DUB but the player reports SUB, a dub wasn't
+      // available for this title/episode, so we're auto-playing sub instead.
+      if (requestedLang === 'dub' && playingLang === 'sub') {
+        if (currentAnime) {
+          currentAnime.fellBackToSub = true;
+          renderPicked();
+        }
+        // reflect the reality in the toggle + local state
+        currentLang = 'sub';
+        syncLangButtons();
+        log('\u2139\uFE0F no dub for this title \u2014 automatically playing <b>sub</b>');
+      }
+    });
     p.on('error', function (e) { log('\u26A0\uFE0F ' + escapeHtml(e && e.message ? e.message : 'player error')); });
   }
 
@@ -572,7 +606,7 @@
         var titleEl = card.querySelector('.t');
         var title = titleEl ? titleEl.textContent : ('anilist ' + id);
 
-        currentAnime = { id: id, title: title, episodes: null, currentEpisode: 1 };
+        currentAnime = { id: id, title: title, episodes: null, currentEpisode: 1, fellBackToSub: false };
         renderPicked();
         renderEpisodes();
         play(id, 1);
@@ -605,7 +639,7 @@
         log('\u274C episode must be a positive whole number.');
         return;
       }
-      currentAnime = { id: anime, title: anime, episodes: null, currentEpisode: episode };
+      currentAnime = { id: anime, title: anime, episodes: null, currentEpisode: episode, fellBackToSub: false };
       renderPicked();
       renderEpisodes();
       if (resultsGrid) {
@@ -622,16 +656,18 @@
       });
     });
 
-    /* ---- SUB / DUB toggle (persistent, above player) ---- */
+    /* ---- SUB / DUB toggle (persistent) ---- */
     langBtns.forEach(function (b) {
       b.addEventListener('click', function () {
         var newLang = b.dataset.lang;
         if (newLang === currentLang) return;
         currentLang = newLang;
+        requestedLang = newLang;
+        if (currentAnime) currentAnime.fellBackToSub = false;
         syncLangButtons();
+        renderPicked();
 
         if (player) {
-          // Re-load the current title in the new language so audio/subs actually switch.
           var id = currentAnime ? currentAnime.id : null;
           var ep = currentAnime ? currentAnime.currentEpisode : 1;
           if (id) {
@@ -640,7 +676,6 @@
               log('\u26A0\uFE0F ' + escapeHtml(err && err.message ? err.message : 'could not switch language'));
             });
           } else {
-            // no title loaded yet; the next play() will pick up currentLang
             log('\u21AA language set to <b>' + currentLang.toUpperCase() + '</b> (applies on next load)');
           }
         } else {
