@@ -2,21 +2,19 @@
  * ---------------------------------------------------------------------------
  * Adds an "Anime" tab (right after Guides) to the grades/attendance site.
  *
- * Uses the AniList API for browsing (search + trending + covers) and a plain
- * iframe pointing at ani.pm, routed through a Cloudflare Worker so it works
- * even when ani.pm is DNS-blocked.
+ * Uses the AniList API for browsing (search + trending + covers) and hands
+ * playback off to ani.pm in a new tab — either directly (if a VPN is on) or
+ * through one of the site's own proxies.
  *
- * No SDK, no postMessage handshake — just an iframe with the embed URL.
- *
- * REQUIRES:
- *   A deployed Cloudflare Worker that accepts:
- *     - /?url=https://ani.pm/...   (query style)
- *     - /embed/ani/...             (path style — used by iframes)
- *   See the Fix A worker code you already deployed.
+ * Why no in-page player: the ani.pm player is served from embed.settlar.io,
+ * which has an explicit frame-ancestors allow-list. A Cloudflare Worker can
+ * rewrite URLs but the browser enforces CSP against the real parent origin,
+ * so the inner iframe refuses to render under any domain other than ani.pm.
+ * Only real session proxies (Rammerhead/Ultraviolet) can get around this, and
+ * those are separate sites — so this tab hands off to them.
  *
  * SETUP:
- *   1. Set WORKER_ORIGIN below to your worker's URL (no trailing slash).
- *   2. Add this right before </body> in index.html:
+ *   Add this right before </body> in index.html:
  *          <script src="anime-tab.js" defer></script>
  * ---------------------------------------------------------------------------
  */
@@ -26,7 +24,19 @@
   /* =========================================================================
      CONFIG
      ========================================================================= */
-  var WORKER_ORIGIN = 'https://ani-proxy.meatlover.workers.dev';
+
+  // Where to send playback. The user picks one of these per-launch.
+  //   'direct'  → opens https://ani.pm/embed/... in a new tab (works if VPN is on)
+  //   'truffled'→ routes through truffled.cv
+  //   'dogeub'  → routes through a DogeUB mirror
+  var PROXIES = {
+    direct:   { label: 'Direct (VPN needed)', build: function (u) { return u; } },
+    truffled: { label: 'truffled',            build: function (u) { return 'https://truffled.cv/#url=' + encodeURIComponent(u); } },
+    dogeub:   { label: 'dogeub',              build: function (u) { return 'https://edu.ronginbari.com/#url=' + encodeURIComponent(u); } },
+  };
+
+  // Default choice for the "open in" dropdown.
+  var DEFAULT_PROXY = 'truffled';
 
   /* =========================================================================
      CONSTANTS
@@ -120,11 +130,19 @@
     '.anime-lang-toggle button { background: transparent; border: none; color: var(--muted); font-family: var(--sans); font-size: 12.5px; font-weight: 600; letter-spacing: 0.08em; padding: 0 18px; cursor: pointer; transition: background 0.15s ease, color 0.15s ease; }',
     '.anime-lang-toggle button:hover { color: var(--ink); }',
     '.anime-lang-toggle button.active { background: var(--accent); color: var(--paper); }',
-    '.anime-lang-note { font-size: 11px; color: var(--muted); line-height: 1.4; text-align: right; max-width: 220px; }',
+    '.anime-lang-note { font-size: 11px; color: var(--muted); line-height: 1.4; text-align: right; max-width: 240px; }',
 
     '.anime-nowbar { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin: 0 0 12px; min-height: 38px; flex-wrap: wrap; }',
     '.anime-picked { font-size: 14px; color: var(--muted); margin: 0; line-height: 1.5; flex: 1 1 auto; min-width: 0; padding-top: 8px; }',
     '.anime-picked b { color: var(--accent); font-weight: 500; }',
+
+    '.anime-proxy-row { display: flex; align-items: center; gap: 10px; margin: 0 0 16px; flex-wrap: wrap; }',
+    '.anime-proxy-row label { font-size: 11.5px; color: var(--muted); letter-spacing: 0.05em; text-transform: uppercase; font-weight: 500; }',
+    '.anime-proxy-select { background: var(--accent-soft); border: 1px solid var(--line); color: var(--ink); font-family: var(--sans); font-size: 13.5px; padding: 8px 12px; border-radius: 6px; outline: none; cursor: pointer; }',
+    '.anime-proxy-select:focus { border-color: var(--accent); }',
+    '.anime-open-btn { background: var(--accent); border: 1px solid var(--accent); color: var(--paper); font-family: var(--serif); font-size: 14.5px; font-weight: 500; padding: 0 22px; height: 38px; border-radius: 6px; cursor: pointer; transition: opacity 0.15s ease; white-space: nowrap; }',
+    '.anime-open-btn:hover, .anime-open-btn:focus-visible { opacity: 0.85; outline: none; }',
+    '.anime-open-btn:disabled { opacity: 0.4; cursor: not-allowed; }',
 
     '.anime-episodes { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 20px; }',
     '.anime-episodes:empty { display: none; }',
@@ -132,9 +150,6 @@
     '.anime-ep-btn:hover, .anime-ep-btn:focus-visible { color: var(--ink); border-color: var(--accent); outline: none; }',
     '.anime-ep-btn.active { background: var(--accent); color: var(--paper); border-color: var(--accent); }',
     '.anime-ep-more { font-size: 12px; color: var(--muted); align-self: center; padding-left: 4px; }',
-
-    '.anime-player-shell { background: #000; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; margin-bottom: 18px; }',
-    '#animePlayer { width: 100%; aspect-ratio: 16 / 9; border: 0; display: block; background: #000; }',
 
     '.anime-status { background: var(--accent-soft); border: 1px solid var(--line); border-radius: 10px; padding: 14px 18px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12.5px; line-height: 1.7; color: #C9C5B6; height: 120px; overflow-y: auto; }',
     '.anime-status .line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }',
@@ -177,6 +192,12 @@
     btn.textContent = 'Anime';
     guidesBtn.insertAdjacentElement('afterend', btn);
 
+    // Build the proxy <option> list from the PROXIES map
+    var proxyOpts = Object.keys(PROXIES).map(function (k) {
+      var sel = k === DEFAULT_PROXY ? ' selected' : '';
+      return '<option value="' + k + '"' + sel + '>' + escapeHtml(PROXIES[k].label) + '</option>';
+    }).join('');
+
     var panel = document.createElement('div');
     panel.className = 'tab-panel';
     panel.id = 'tab-anime';
@@ -188,7 +209,8 @@
       '  <p class="anime-hint">',
       '    powered by <a href="https://ani.pm" target="_blank" rel="noopener noreferrer">ani.pm</a>',
       '    &middot; data from <a href="https://anilist.co" target="_blank" rel="noopener noreferrer">anilist</a>.',
-      '    search below and click a cover to play. switch sub / dub anytime with the toggle above the player.',
+      '    search below, pick a cover, choose an episode, then hit <b>Open</b> &mdash; playback opens in a new tab',
+      '    (either direct, if a VPN is on, or through a proxy).',
       '  </p>',
       '',
       '  <div class="anime-search-wrap">',
@@ -210,7 +232,7 @@
       '        <label for="animeEpInput">episode</label>',
       '        <input type="number" id="animeEpInput" class="anime-input" value="1" min="1" step="1" inputmode="numeric">',
       '      </div>',
-      '      <button type="button" id="animeLoadBtn" class="anime-load-btn">Load</button>',
+      '      <button type="button" id="animeLoadBtn" class="anime-load-btn">Select</button>',
       '    </div>',
       '  </details>',
       '',
@@ -221,14 +243,16 @@
       '        <button type="button" data-lang="sub" class="active" aria-pressed="true">SUB</button>',
       '        <button type="button" data-lang="dub" aria-pressed="false">DUB</button>',
       '      </div>',
-      '      <div class="anime-lang-note">if a dub isn&rsquo;t available, it plays sub automatically</div>',
+      '      <div class="anime-lang-note">if a dub isn&rsquo;t available, ani.pm falls back to sub on its own</div>',
       '    </div>',
       '  </div>',
       '',
       '  <div class="anime-episodes" id="animeEpisodes" role="group" aria-label="Episode"></div>',
       '',
-      '  <div class="anime-player-shell">',
-      '    <iframe id="animePlayer" src="about:blank" allow="autoplay; fullscreen; picture-in-picture; encrypted-media" allowfullscreen></iframe>',
+      '  <div class="anime-proxy-row">',
+      '    <label for="animeProxySelect">open in</label>',
+      '    <select id="animeProxySelect" class="anime-proxy-select">' + proxyOpts + '</select>',
+      '    <button type="button" id="animeOpenBtn" class="anime-open-btn" disabled>Open episode</button>',
       '  </div>',
       '',
       '  <div class="anime-status" id="animeStatus" aria-live="polite"></div>',
@@ -390,8 +414,10 @@
       el.innerHTML = 'nothing selected yet &mdash; pick a cover above or enter an id manually.';
       return;
     }
-    el.innerHTML = 'now playing: <b>' + escapeHtml(currentAnime.title) + '</b> (anilist <b>' +
-      escapeHtml(String(currentAnime.id)) + '</b>)';
+    el.innerHTML = 'selected: <b>' + escapeHtml(currentAnime.title) + '</b> &middot; episode <b>' +
+      escapeHtml(String(currentAnime.currentEpisode)) + '</b> &middot; ' +
+      '<b>' + currentLang.toUpperCase() + '</b>';
+    updateOpenButton();
   }
 
   function renderEpisodes() {
@@ -422,9 +448,12 @@
     }
   }
 
-  /* =========================================================================
-     6. Play — plain iframe, routed through the worker
-     ========================================================================= */
+  function updateOpenButton() {
+    var b = document.getElementById('animeOpenBtn');
+    if (!b) return;
+    b.disabled = !currentAnime;
+  }
+
   function syncLangButtons() {
     document.querySelectorAll('.anime-lang-toggle button').forEach(function (b) {
       var on = b.dataset.lang === currentLang;
@@ -433,27 +462,31 @@
     });
   }
 
-  function play(animeId, episode) {
+  /* =========================================================================
+     6. Open the selected episode in a new tab
+     ========================================================================= */
+  function buildEmbedUrl(animeId, episode) {
     var idStr = String(animeId);
     var ep = Number(episode) || 1;
-
-    if (currentAnime) currentAnime.currentEpisode = ep;
-    renderEpisodes();
-    renderPicked();
-
-    // Build the real ani.pm embed URL, then route it through the worker.
-    var embedPath = /^mal-\d+$/.test(idStr)
+    var path = /^mal-\d+$/.test(idStr)
       ? '/embed/mal/' + idStr.slice(4) + '/' + ep + '/' + currentLang
       : '/embed/ani/' + idStr + '/' + ep + '/' + currentLang;
+    return 'https://ani.pm' + path;
+  }
 
-    var fullEmbed = 'https://ani.pm' + embedPath;
-    var proxied = WORKER_ORIGIN + '/?url=' + encodeURIComponent(fullEmbed);
-
-    var frame = document.getElementById('animePlayer');
-    if (frame) {
-      frame.src = proxied;
-      log('\u25B6 loading <b>' + escapeHtml(idStr) + '</b> ep ' + ep + ' (' + currentLang + ')');
+  function openSelected() {
+    if (!currentAnime) {
+      log('\u274C nothing selected yet');
+      return;
     }
+    var embed = buildEmbedUrl(currentAnime.id, currentAnime.currentEpisode);
+    var sel = document.getElementById('animeProxySelect');
+    var key = sel && PROXIES[sel.value] ? sel.value : DEFAULT_PROXY;
+    var url = PROXIES[key].build(embed);
+
+    log('\u2197 opening <b>' + escapeHtml(currentAnime.id) + '</b> ep ' + currentAnime.currentEpisode +
+        ' (' + currentLang + ') via <b>' + escapeHtml(PROXIES[key].label) + '</b>');
+    window.open(url, '_blank', 'noopener,noreferrer');
   }
 
   /* =========================================================================
@@ -470,6 +503,7 @@
     var loadBtn = document.getElementById('animeLoadBtn');
     var langBtns = document.querySelectorAll('.anime-lang-toggle button');
     var episodesWrap = document.getElementById('animeEpisodes');
+    var openBtn = document.getElementById('animeOpenBtn');
 
     /* ---- trending on open ---- */
     setSearchStatus('loading trending\u2026');
@@ -520,7 +554,7 @@
       });
     }
 
-    /* ---- click a cover ---- */
+    /* ---- click a cover: select it, don't auto-open ---- */
     if (resultsGrid) {
       resultsGrid.addEventListener('click', function (e) {
         var card = e.target.closest('.anime-card');
@@ -538,7 +572,7 @@
         currentAnime = { id: id, title: title, episodes: null, currentEpisode: 1 };
         renderPicked();
         renderEpisodes();
-        play(id, 1);
+        log('\u2714 selected <b>' + escapeHtml(title) + '</b> \u2014 choose an episode, then hit Open');
       });
     }
 
@@ -552,12 +586,12 @@
           x.classList.toggle('active', x === b);
         });
         currentAnime.currentEpisode = ep;
-        play(currentAnime.id, ep);
+        renderPicked();
       });
     }
 
-    /* ---- manual load ---- */
-    function manualLoad() {
+    /* ---- manual select ---- */
+    function manualSelect() {
       var anime = parseAnimeId(idInput.value);
       var episode = parseInt(epInput.value, 10);
       if (!anime) {
@@ -574,34 +608,33 @@
       if (resultsGrid) {
         resultsGrid.querySelectorAll('.anime-card').forEach(function (c) { c.classList.remove('active'); });
       }
-      play(anime, episode);
+      log('\u2714 selected <b>' + escapeHtml(anime) + '</b> ep ' + episode + ' \u2014 hit Open');
     }
 
-    if (loadBtn) loadBtn.addEventListener('click', manualLoad);
+    if (loadBtn) loadBtn.addEventListener('click', manualSelect);
     [idInput, epInput].forEach(function (inp) {
       if (!inp) return;
       inp.addEventListener('keydown', function (e) {
-        if (e.key === 'Enter') { e.preventDefault(); manualLoad(); }
+        if (e.key === 'Enter') { e.preventDefault(); manualSelect(); }
       });
     });
 
-    /* ---- SUB / DUB toggle: reload the iframe with the new lang ---- */
+    /* ---- SUB / DUB toggle: just updates state, apply on next Open ---- */
     langBtns.forEach(function (b) {
       b.addEventListener('click', function () {
         var newLang = b.dataset.lang;
         if (newLang === currentLang) return;
         currentLang = newLang;
         syncLangButtons();
-        if (currentAnime) {
-          play(currentAnime.id, currentAnime.currentEpisode);
-        } else {
-          log('\u21AA language set to <b>' + currentLang.toUpperCase() + '</b> (applies on next load)');
-        }
+        renderPicked();
       });
     });
 
+    if (openBtn) openBtn.addEventListener('click', openSelected);
+
     syncLangButtons();
     renderPicked();
+    updateOpenButton();
   }
 
   /* =========================================================================
