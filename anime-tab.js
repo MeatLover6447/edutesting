@@ -2,19 +2,21 @@
  * ---------------------------------------------------------------------------
  * Adds an "Anime" tab (right after Guides) to the grades/attendance site.
  *
- * Uses the AniList API for browsing (search + trending + covers) and hands
- * playback off to ani.pm in a new tab.
+ * This is a pure AniList browser:
+ *   - Trending grid loads on open
+ *   - Search by title
+ *   - Click a cover to select it, pick an episode, pick SUB/DUB
+ *   - "Search on [site]" opens a proxy/anime site in a new tab with the
+ *     title pre-filled (or just the homepage, depending on what the site
+ *     supports)
  *
- * Two ways to play:
- *   - "Open episode" → opens the ani.pm WATCH page in a new tab
- *                      (https://ani.pm/anime/<id>/<ep>/<lang>)
- *   - "Copy link"    → copies that same URL to your clipboard, so you can
- *                      paste it into whichever proxy you're using
- *
- * Why no in-page player: the ani.pm player is served from embed.settlar.io,
- * which has a strict frame-ancestors allow-list. A Cloudflare Worker can
- * rewrite URLs but the browser enforces CSP against the real parent origin,
- * so the inner iframe refuses to render under any domain other than ani.pm.
+ * Why no in-page player and no ani.pm deep links:
+ *   ani.pm's player is served from embed.settlar.io with a strict
+ *   frame-ancestors allow-list (ani.pm, ani.nz, next.ani.pm, ...). It only
+ *   renders inside an iframe on one of those origins. The /embed/ URLs 404
+ *   when loaded as a top-level page, and there's no public watch URL. So
+ *   ani.pm can't be embedded or deep-linked from here — the tab browses
+ *   AniList and hands off to whatever site you actually use to watch.
  *
  * SETUP:
  *   Add this right before </body> in index.html:
@@ -25,16 +27,52 @@
   'use strict';
 
   /* =========================================================================
-     CONFIG
+     CONFIG — where to send the user when they hit "Search on ..."
+     Add or remove entries freely. `search` is optional:
+       - if provided, it builds a URL that includes the title
+       - if omitted, it just opens the site's homepage
      ========================================================================= */
-
-  // Where to send playback. Add more entries if you find a proxy that accepts
-  // a URL via its query string or fragment.
-  var PROXIES = {
-    direct: { label: 'Direct (VPN needed)', build: function (u) { return u; } }
+  var WATCH_SITES = {
+    truffled: {
+      label: 'Truffled',
+      home: 'https://truffled.cv/',
+      // Truffled doesn't document a search-URL format; opens homepage.
+    },
+    dogeub: {
+      label: 'DogeUB',
+      home: 'https://edu.ronginbari.com/',
+    },
+    interstellar: {
+      label: 'Interstellar',
+      home: 'https://79625.d-n-s.org.uk/',
+    },
+    mizumath: {
+      label: 'Mizumath',
+      home: 'https://ongoingeducation.online/',
+    },
+    korona: {
+      label: 'Korona',
+      home: 'https://korona.thewhitedoveschools.org/',
+    },
+    selenite: {
+      label: 'Selenite',
+      home: 'https://gospel.newcovenant-teaching.org/',
+    },
+    movy: {
+      label: 'Movy',
+      home: 'https://www.movy.sx/',
+    },
+    rivestream: {
+      label: 'Rivestream',
+      home: 'https://www.rivestream.app',
+    },
+    corsflix: {
+      label: 'CorsFlix',
+      home: 'https://watch.corsflix.net/',
+    },
   };
 
-  var DEFAULT_PROXY = 'direct';
+  var DEFAULT_SITE = 'truffled';
 
   /* =========================================================================
      CONSTANTS
@@ -191,9 +229,9 @@
     btn.textContent = 'Anime';
     guidesBtn.insertAdjacentElement('afterend', btn);
 
-    var proxyOpts = Object.keys(PROXIES).map(function (k) {
-      var sel = k === DEFAULT_PROXY ? ' selected' : '';
-      return '<option value="' + k + '"' + sel + '>' + escapeHtml(PROXIES[k].label) + '</option>';
+    var siteOpts = Object.keys(WATCH_SITES).map(function (k) {
+      var sel = k === DEFAULT_SITE ? ' selected' : '';
+      return '<option value="' + k + '"' + sel + '>' + escapeHtml(WATCH_SITES[k].label) + '</option>';
     }).join('');
 
     var panel = document.createElement('div');
@@ -205,10 +243,8 @@
       '  <div class="rule"></div>',
       '',
       '  <p class="anime-hint">',
-      '    powered by <a href="https://ani.pm" target="_blank" rel="noopener noreferrer">ani.pm</a>',
-      '    &middot; data from <a href="https://anilist.co" target="_blank" rel="noopener noreferrer">anilist</a>.',
-      '    search below, click a cover, choose an episode, then <b>Open episode</b>.',
-      '    if the tab is blocked, use <b>Copy link</b> and paste it into whatever proxy you use.',
+      '    browse with <a href="https://anilist.co" target="_blank" rel="noopener noreferrer">anilist</a>',
+      '    &middot; when you find something, pick an episode and hit <b>Search on &hellip;</b> to open it on the site you actually watch on.',
       '  </p>',
       '',
       '  <div class="anime-search-wrap">',
@@ -241,17 +277,17 @@
       '        <button type="button" data-lang="sub" class="active" aria-pressed="true">SUB</button>',
       '        <button type="button" data-lang="dub" aria-pressed="false">DUB</button>',
       '      </div>',
-      '      <div class="anime-lang-note">if a dub isn&rsquo;t available, ani.pm falls back to sub on its own</div>',
+      '      <div class="anime-lang-note">just a preference \u2014 the site you open decides what it has</div>',
       '    </div>',
       '  </div>',
       '',
       '  <div class="anime-episodes" id="animeEpisodes" role="group" aria-label="Episode"></div>',
       '',
       '  <div class="anime-proxy-row">',
-      '    <label for="animeProxySelect">open in</label>',
-      '    <select id="animeProxySelect" class="anime-proxy-select">' + proxyOpts + '</select>',
-      '    <button type="button" id="animeOpenBtn" class="anime-open-btn" disabled>Open episode</button>',
-      '    <button type="button" id="animeCopyBtn" class="anime-open-btn ghost" disabled>Copy link</button>',
+      '    <label for="animeProxySelect">watch on</label>',
+      '    <select id="animeProxySelect" class="anime-proxy-select">' + siteOpts + '</select>',
+      '    <button type="button" id="animeOpenBtn" class="anime-open-btn" disabled>Search on site</button>',
+      '    <button type="button" id="animeCopyBtn" class="anime-open-btn ghost" disabled>Copy title</button>',
       '  </div>',
       '',
       '  <div class="anime-status" id="animeStatus" aria-live="polite"></div>',
@@ -464,42 +500,39 @@
   }
 
   /* =========================================================================
-     6. Open / copy the selected episode
+     6. Open the chosen watch site
      ========================================================================= */
-  function buildWatchUrl(animeId, episode) {
-    var idStr = String(animeId);
-    var ep = Number(episode) || 1;
-    if (/^mal-\d+$/.test(idStr)) {
-      return 'https://ani.pm/anime/mal-' + idStr.slice(4) + '/' + ep + '/' + currentLang;
-    }
-    return 'https://ani.pm/anime/' + idStr + '/' + ep + '/' + currentLang;
-  }
-
-  function openSelected() {
+  function openWatchSite() {
     if (!currentAnime) {
       log('\u274C nothing selected yet');
       return;
     }
-    var watch = buildWatchUrl(currentAnime.id, currentAnime.currentEpisode);
     var sel = document.getElementById('animeProxySelect');
-    var key = sel && PROXIES[sel.value] ? sel.value : DEFAULT_PROXY;
-    var url = PROXIES[key].build(watch);
-    log('\u2197 opening <b>' + escapeHtml(currentAnime.id) + '</b> ep ' + currentAnime.currentEpisode +
-        ' (' + currentLang + ') \u2014 ' + escapeHtml(watch));
+    var key = sel && WATCH_SITES[sel.value] ? sel.value : DEFAULT_SITE;
+    var site = WATCH_SITES[key];
+
+    // If the site defines a search URL format, use it. Otherwise homepage.
+    var url = site.home;
+    if (typeof site.search === 'function') {
+      url = site.search(currentAnime.title, currentAnime.currentEpisode, currentLang);
+    }
+
+    log('\u2197 opening <b>' + escapeHtml(site.label) + '</b> \u2014 search for <b>' +
+        escapeHtml(currentAnime.title) + '</b> there');
     window.open(url, '_blank', 'noopener,noreferrer');
   }
 
-  function copySelected() {
+  function copyTitle() {
     if (!currentAnime) return;
-    var watch = buildWatchUrl(currentAnime.id, currentAnime.currentEpisode);
+    var text = currentAnime.title + (currentAnime.currentEpisode > 1 ? ' episode ' + currentAnime.currentEpisode : '');
     if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(watch).then(function () {
-        log('\u{1F4CB} copied <b>' + escapeHtml(watch) + '</b> \u2014 paste it into your proxy');
+      navigator.clipboard.writeText(text).then(function () {
+        log('\u{1F4CB} copied <b>' + escapeHtml(text) + '</b> \u2014 paste it into the site\'s search');
       }).catch(function () {
-        log('\u{1F4CB} ' + escapeHtml(watch));
+        log('\u{1F4CB} ' + escapeHtml(text));
       });
     } else {
-      log('\u{1F4CB} ' + escapeHtml(watch));
+      log('\u{1F4CB} ' + escapeHtml(text));
     }
   }
 
@@ -587,7 +620,7 @@
         currentAnime = { id: id, title: title, episodes: null, currentEpisode: 1 };
         renderPicked();
         renderEpisodes();
-        log('\u2714 selected <b>' + escapeHtml(title) + '</b> \u2014 choose an episode, then hit Open episode');
+        log('\u2714 selected <b>' + escapeHtml(title) + '</b> \u2014 choose an episode, then hit Search on site');
       });
     }
 
@@ -623,7 +656,7 @@
       if (resultsGrid) {
         resultsGrid.querySelectorAll('.anime-card').forEach(function (c) { c.classList.remove('active'); });
       }
-      log('\u2714 selected <b>' + escapeHtml(anime) + '</b> ep ' + episode + ' \u2014 hit Open episode');
+      log('\u2714 selected <b>' + escapeHtml(anime) + '</b> ep ' + episode + ' \u2014 hit Search on site');
     }
 
     if (loadBtn) loadBtn.addEventListener('click', manualSelect);
@@ -634,7 +667,7 @@
       });
     });
 
-    /* ---- SUB / DUB toggle: just updates state, apply on next Open ---- */
+    /* ---- SUB / DUB toggle: preference only ---- */
     langBtns.forEach(function (b) {
       b.addEventListener('click', function () {
         var newLang = b.dataset.lang;
@@ -645,8 +678,8 @@
       });
     });
 
-    if (openBtn) openBtn.addEventListener('click', openSelected);
-    if (copyBtn) copyBtn.addEventListener('click', copySelected);
+    if (openBtn) openBtn.addEventListener('click', openWatchSite);
+    if (copyBtn) copyBtn.addEventListener('click', copyTitle);
 
     syncLangButtons();
     renderPicked();
