@@ -3,15 +3,18 @@
  * Adds an "Anime" tab (right after Guides) to the grades/attendance site.
  *
  * Uses the AniList API for browsing (search + trending + covers) and hands
- * playback off to ani.pm in a new tab — either directly (if a VPN is on) or
- * through one of the site's own proxies.
+ * playback off to ani.pm in a new tab.
+ *
+ * Two ways to play:
+ *   - "Open episode" → opens the ani.pm WATCH page in a new tab
+ *                      (https://ani.pm/anime/<id>/<ep>/<lang>)
+ *   - "Copy link"    → copies that same URL to your clipboard, so you can
+ *                      paste it into whichever proxy you're using
  *
  * Why no in-page player: the ani.pm player is served from embed.settlar.io,
- * which has an explicit frame-ancestors allow-list. A Cloudflare Worker can
+ * which has a strict frame-ancestors allow-list. A Cloudflare Worker can
  * rewrite URLs but the browser enforces CSP against the real parent origin,
  * so the inner iframe refuses to render under any domain other than ani.pm.
- * Only real session proxies (Rammerhead/Ultraviolet) can get around this, and
- * those are separate sites — so this tab hands off to them.
  *
  * SETUP:
  *   Add this right before </body> in index.html:
@@ -25,18 +28,13 @@
      CONFIG
      ========================================================================= */
 
-  // Where to send playback. The user picks one of these per-launch.
-  //   'direct'  → opens https://ani.pm/embed/... in a new tab (works if VPN is on)
-  //   'truffled'→ routes through truffled.cv
-  //   'dogeub'  → routes through a DogeUB mirror
+  // Where to send playback. Add more entries if you find a proxy that accepts
+  // a URL via its query string or fragment.
   var PROXIES = {
-    direct:   { label: 'Direct (VPN needed)', build: function (u) { return u; } },
-    truffled: { label: 'truffled',            build: function (u) { return 'https://truffled.cv/#url=' + encodeURIComponent(u); } },
-    dogeub:   { label: 'dogeub',              build: function (u) { return 'https://edu.ronginbari.com/#url=' + encodeURIComponent(u); } },
+    direct: { label: 'Direct (VPN needed)', build: function (u) { return u; } }
   };
 
-  // Default choice for the "open in" dropdown.
-  var DEFAULT_PROXY = 'truffled';
+  var DEFAULT_PROXY = 'direct';
 
   /* =========================================================================
      CONSTANTS
@@ -143,6 +141,7 @@
     '.anime-open-btn { background: var(--accent); border: 1px solid var(--accent); color: var(--paper); font-family: var(--serif); font-size: 14.5px; font-weight: 500; padding: 0 22px; height: 38px; border-radius: 6px; cursor: pointer; transition: opacity 0.15s ease; white-space: nowrap; }',
     '.anime-open-btn:hover, .anime-open-btn:focus-visible { opacity: 0.85; outline: none; }',
     '.anime-open-btn:disabled { opacity: 0.4; cursor: not-allowed; }',
+    '.anime-open-btn.ghost { background: transparent; color: var(--accent); }',
 
     '.anime-episodes { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 20px; }',
     '.anime-episodes:empty { display: none; }',
@@ -192,7 +191,6 @@
     btn.textContent = 'Anime';
     guidesBtn.insertAdjacentElement('afterend', btn);
 
-    // Build the proxy <option> list from the PROXIES map
     var proxyOpts = Object.keys(PROXIES).map(function (k) {
       var sel = k === DEFAULT_PROXY ? ' selected' : '';
       return '<option value="' + k + '"' + sel + '>' + escapeHtml(PROXIES[k].label) + '</option>';
@@ -209,8 +207,8 @@
       '  <p class="anime-hint">',
       '    powered by <a href="https://ani.pm" target="_blank" rel="noopener noreferrer">ani.pm</a>',
       '    &middot; data from <a href="https://anilist.co" target="_blank" rel="noopener noreferrer">anilist</a>.',
-      '    search below, pick a cover, choose an episode, then hit <b>Open</b> &mdash; playback opens in a new tab',
-      '    (either direct, if a VPN is on, or through a proxy).',
+      '    search below, click a cover, choose an episode, then <b>Open episode</b>.',
+      '    if the tab is blocked, use <b>Copy link</b> and paste it into whatever proxy you use.',
       '  </p>',
       '',
       '  <div class="anime-search-wrap">',
@@ -253,6 +251,7 @@
       '    <label for="animeProxySelect">open in</label>',
       '    <select id="animeProxySelect" class="anime-proxy-select">' + proxyOpts + '</select>',
       '    <button type="button" id="animeOpenBtn" class="anime-open-btn" disabled>Open episode</button>',
+      '    <button type="button" id="animeCopyBtn" class="anime-open-btn ghost" disabled>Copy link</button>',
       '  </div>',
       '',
       '  <div class="anime-status" id="animeStatus" aria-live="polite"></div>',
@@ -412,6 +411,7 @@
     if (!el) return;
     if (!currentAnime) {
       el.innerHTML = 'nothing selected yet &mdash; pick a cover above or enter an id manually.';
+      updateOpenButton();
       return;
     }
     el.innerHTML = 'selected: <b>' + escapeHtml(currentAnime.title) + '</b> &middot; episode <b>' +
@@ -450,8 +450,9 @@
 
   function updateOpenButton() {
     var b = document.getElementById('animeOpenBtn');
-    if (!b) return;
-    b.disabled = !currentAnime;
+    var c = document.getElementById('animeCopyBtn');
+    if (b) b.disabled = !currentAnime;
+    if (c) c.disabled = !currentAnime;
   }
 
   function syncLangButtons() {
@@ -463,15 +464,15 @@
   }
 
   /* =========================================================================
-     6. Open the selected episode in a new tab
+     6. Open / copy the selected episode
      ========================================================================= */
-  function buildEmbedUrl(animeId, episode) {
+  function buildWatchUrl(animeId, episode) {
     var idStr = String(animeId);
     var ep = Number(episode) || 1;
-    var path = /^mal-\d+$/.test(idStr)
-      ? '/embed/mal/' + idStr.slice(4) + '/' + ep + '/' + currentLang
-      : '/embed/ani/' + idStr + '/' + ep + '/' + currentLang;
-    return 'https://ani.pm' + path;
+    if (/^mal-\d+$/.test(idStr)) {
+      return 'https://ani.pm/anime/mal-' + idStr.slice(4) + '/' + ep + '/' + currentLang;
+    }
+    return 'https://ani.pm/anime/' + idStr + '/' + ep + '/' + currentLang;
   }
 
   function openSelected() {
@@ -479,14 +480,27 @@
       log('\u274C nothing selected yet');
       return;
     }
-    var embed = buildEmbedUrl(currentAnime.id, currentAnime.currentEpisode);
+    var watch = buildWatchUrl(currentAnime.id, currentAnime.currentEpisode);
     var sel = document.getElementById('animeProxySelect');
     var key = sel && PROXIES[sel.value] ? sel.value : DEFAULT_PROXY;
-    var url = PROXIES[key].build(embed);
-
+    var url = PROXIES[key].build(watch);
     log('\u2197 opening <b>' + escapeHtml(currentAnime.id) + '</b> ep ' + currentAnime.currentEpisode +
-        ' (' + currentLang + ') via <b>' + escapeHtml(PROXIES[key].label) + '</b>');
+        ' (' + currentLang + ') \u2014 ' + escapeHtml(watch));
     window.open(url, '_blank', 'noopener,noreferrer');
+  }
+
+  function copySelected() {
+    if (!currentAnime) return;
+    var watch = buildWatchUrl(currentAnime.id, currentAnime.currentEpisode);
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(watch).then(function () {
+        log('\u{1F4CB} copied <b>' + escapeHtml(watch) + '</b> \u2014 paste it into your proxy');
+      }).catch(function () {
+        log('\u{1F4CB} ' + escapeHtml(watch));
+      });
+    } else {
+      log('\u{1F4CB} ' + escapeHtml(watch));
+    }
   }
 
   /* =========================================================================
@@ -504,6 +518,7 @@
     var langBtns = document.querySelectorAll('.anime-lang-toggle button');
     var episodesWrap = document.getElementById('animeEpisodes');
     var openBtn = document.getElementById('animeOpenBtn');
+    var copyBtn = document.getElementById('animeCopyBtn');
 
     /* ---- trending on open ---- */
     setSearchStatus('loading trending\u2026');
@@ -554,7 +569,7 @@
       });
     }
 
-    /* ---- click a cover: select it, don't auto-open ---- */
+    /* ---- click a cover: select it ---- */
     if (resultsGrid) {
       resultsGrid.addEventListener('click', function (e) {
         var card = e.target.closest('.anime-card');
@@ -572,7 +587,7 @@
         currentAnime = { id: id, title: title, episodes: null, currentEpisode: 1 };
         renderPicked();
         renderEpisodes();
-        log('\u2714 selected <b>' + escapeHtml(title) + '</b> \u2014 choose an episode, then hit Open');
+        log('\u2714 selected <b>' + escapeHtml(title) + '</b> \u2014 choose an episode, then hit Open episode');
       });
     }
 
@@ -608,7 +623,7 @@
       if (resultsGrid) {
         resultsGrid.querySelectorAll('.anime-card').forEach(function (c) { c.classList.remove('active'); });
       }
-      log('\u2714 selected <b>' + escapeHtml(anime) + '</b> ep ' + episode + ' \u2014 hit Open');
+      log('\u2714 selected <b>' + escapeHtml(anime) + '</b> ep ' + episode + ' \u2014 hit Open episode');
     }
 
     if (loadBtn) loadBtn.addEventListener('click', manualSelect);
@@ -631,6 +646,7 @@
     });
 
     if (openBtn) openBtn.addEventListener('click', openSelected);
+    if (copyBtn) copyBtn.addEventListener('click', copySelected);
 
     syncLangButtons();
     renderPicked();
